@@ -4,7 +4,10 @@ from uefi_firmware.uefi import *
 import hashlib
 from OpenSSL import crypto
 import M2Crypto
+import base64
 
+
+EFI_FFS_FILE_HEADER_SIZE=24
 
 def check_firmware_sig(fname):
     fp = open(fname, 'rb')
@@ -14,7 +17,7 @@ def check_firmware_sig(fname):
     volume_indices = search_firmware_volumes (data)
     firmware_volume_list=[]
     for index in volume_indices:
-        print("volume at index 0x%8x"%(index))
+        print("volume at index 0x%08x 0x%08x"%(index, index-40))
         datastart = data[index-40:]
         name = index-40
         firmware_volume = FirmwareVolume(datastart, name)
@@ -33,34 +36,36 @@ def check_firmware_sig(fname):
     print("Sigtable")
     print("=====================")
     for entry in table:
-        print("off=0x%08x end=0x%08x flag=%d"%(entry[0], entry[0]+entry[1], entry[2]))
+        print("off=0x%08x end=0x%08x len=%d flag=%d"%(entry[0], entry[0]+entry[1], entry[1], entry[2]))
     print()
+
+    additional_unsigneds(data, firmware_volume_list)
+
+    
 
     # extract the signed digest
     signedkey = extract_signed_digest(data, offset, length)
     print("pkcs7 key extracted, is_signed = %d is_data=%d"%(signedkey.type_is_signed(), signedkey.type_is_data()))
 
+
+    
+
     # extract the public key
-    pk_guid='3A666558-43E3-4D25-9169-DB81F5DB42E1'
-    pk_offset, pk_length = find_guid_offset(firmware_volume_list, pk_guid)
-    if not pk_offset: exit(1)
-    print('--> pubkey guid %s found offset=0x%x size=%d'%(pk_guid, pk_offset, pk_length))
-    pkcert = extract_pk (data, pk_offset, pk_length)
+    pkcert_guid='3A666558-43E3-4D25-9169-DB81F5DB42E1'
+    pkcert_offset, pkcert_length = find_guid_offset(firmware_volume_list, pkcert_guid)
+    if not pkcert_offset: exit(1)
+    print('--> pubkey guid %s found offset=0x%x size=%d'%(pkcert_guid, pkcert_offset, pkcert_length))
+    pkcert, pubkey = m2crypto_extract_cert (data, pkcert_offset, pkcert_length)
+
     print("pkcert extracted, signer=%s"%(pkcert.get_issuer()))
-    pk=pkcert.get_pubkey()
-    print(pk)
-    
 
-    #    MCrypto.RSA.load_key_string
 
-    
-    #cipher=PKCS1_OAEP.new(pk)
 
-    #crypto._lib.RSA_public_decrypt
+    signedbody, len, digest = collect_signeddata (data, table)
 
-    # M2Crypto.RSA.RSA.public_decrypt
-    
-    # bla
+    print(len)
+    print(digest)
+
     return
         
 # #########################################################
@@ -85,11 +90,12 @@ def extract_sig_table (data, offset, length):
     table=[]
     for off1 in range(0xef4,length, 24):
         try:
-            _, _, off2, len2, flag2, _ = struct.unpack('<LLLLLL', data[offset+off1:offset+off1+24])
+            fun, zeros, first, len2, flag2, bla = struct.unpack('<LLLLLL', data[offset+off1:offset+off1+24])
             if off1 == 0: break
         except:
             break
-        table.append((off2, len2, flag2))
+        print("first=0x%08x last=0x%08x n=0x%08x flag=%d len2=%d"%(first, first+len2, bla, flag2, len2))
+        table.append((first, len2, flag2))
     return table
 
 
@@ -126,38 +132,79 @@ def extract_signed_digest(data, offset, length):
     cert=crypto.load_pkcs7_data(crypto.FILETYPE_ASN1, data[offset:offset+wc_dwlen-24-fudge])
     return cert
 
-def extract_pk(data, offset, length):
+def m2crypto_extract_cert (data, offset, length):
     offset += 100
-    return crypto.load_certificate(crypto.FILETYPE_ASN1, data[offset:offset+length])
+    pkcert=M2Crypto.X509.load_cert_string(data[offset:offset+length], M2Crypto.X509.FORMAT_DER)
+    return (pkcert, pkcert.get_pubkey())
+
+def collect_signeddata(data, table):
+    body=b''
+    newlen=0
+    for entry in table:
+        offset=entry[0]
+        length=entry[1]
+        flag=entry[2]
+        if flag == 0:
+            body += data[offset:offset+length]
+            newlen += length
+    m=hashlib.sha256()
+    m.update(body)
+    return ( body, newlen, m.hexdigest() )
+
+
+def additional_unsigneds (data, firmware_volume_list):
+    print("additional unsigned regions")
+
+
+    # OA2
+    # As with all firmware modules, the GUID is the Name in an EFI_FFS_FILE_HEADER struct.
+    # The entire module is unsigned except for the header, so the size of the unsigned
+    # region can be calculated with Size[3] ? sizeof(EFI_FFS_FILE_HEADER).
+
+    guid='69009842-63F2-43DB-964B-EFAD1C39EC85'
+    offset, length = find_guid_offset (firmware_volume_list, guid)
+    offset += EFI_FFS_FILE_HEADER_SIZE
+    length -= EFI_FFS_FILE_HEADER_SIZE
+    print("OA2 0x%08x, 0x%08x %d"%(offset, offset+length, length))
+
+    # OA2
+    # As with all firmware modules, the GUID is the Name in an EFI_FFS_FILE_HEADER struct.
+    # The entire module is unsigned except for the header, so the size of the unsigned
+    # region can be calculated with Size[3] ? sizeof(EFI_FFS_FILE_HEADER).
+
+    guid='996AA1E0-1E8C-4F36-B519-A170A206FC14'
+    offset, length = find_guid_offset (firmware_volume_list, guid) 
+    offset += EFI_FFS_FILE_HEADER_SIZE
+    length -= EFI_FFS_FILE_HEADER_SIZE
+    print("OA2 0x%08x, 0x%08x %d"%(offset, offset+length, length))
+    
+    # OA3
+
+    guid='3FD1D3A2-99F7-420b-BC69-8BB1D492A332'
+    offset, length = find_guid_offset (firmware_volume_list, guid)
+    # skip over the header
+    for off1 in range(offset, offset+length, 4):
+        val=struct.unpack('4s',data[off1:off1+4])
+        if val[0] == b'$FID':
+            print("off1=%x"%(off1))
+            break
+    print("OA3 0x%08x, 0x%08x %d"%(off1, offset+49, 49))
+    
+    
+    # signature
+    
+        
+    guid='414D94AD-998D-47D2-BFCD-4E882241DE32'
+    offset, length = find_guid_offset (firmware_volume_list, guid) 
+    offset+=116
+    print(unpack_guid(data[offset:]))
+    offset+=30
+    newlen=struct.unpack('<H',data[offset:offset+2])
+    print(newlen[0])
+    print("sig 0x%08x, 0x%08x %d"%(offset, offset+newlen[0], newlen[0]))
+    
     
 
-
-
-
-
-#        dict = firmware_volume.to_dict()
-#        for ff in dict['ffs']:
-#            if ff['guid'] == '414D94AD-998D-47D2-BFCD-4E882241DE32'.lower():
-#                print(ff)
-#                startoffset=ff['offset']
-#                endoffset=ff['offset']+ff['size']
-#                body=data[startoffset:endoffset]
-#                table=extract_offset_table(body)
-
-#    m1=hashlib.sha256()
-#    m2=hashlib.sha256()
-#    m3=hashlib.sha256()
-#    for entry in table:
-#        start = entry[0]
-#        end = entry[0]+entry[1]
-#        print("off=0x%08x end=0x%08x flag=%d"%(start, end, entry[2]))
-#        m1.update(data[start:end])
-#        if  entry[2] == 1: m2.update(data[start:end])
-#        if  entry[2] == 0: m3.update(data[start:end])
-
-#    print(m1.hexdigest())
-#    print(m2.hexdigest())
-#    print(m3.hexdigest())
 
 
 
@@ -171,7 +218,7 @@ def unpack_guid (data):
 
 
 
-check_firmware_sig('IBM_X11QPH_20211018_storage.ROM')
+check_firmware_sig('/home/galmasi/code/firmware/supermicro/IBM_X11QPH_20211018_storage.ROM')
 
 
 
