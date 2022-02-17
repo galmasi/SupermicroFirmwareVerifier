@@ -3,7 +3,7 @@
 from uefi_firmware.uefi import *
 import hashlib
 from OpenSSL import crypto
-import M2Crypto
+#import M2Crypto
 import base64
 
 
@@ -33,38 +33,57 @@ def check_firmware_sig(fname):
     # extract the (undocumented) signature table
     table = extract_sig_table (data, offset, length)
 
-    print("Sigtable")
+    print("\nSigtable")
     print("=====================")
     for entry in table:
-        print("off=0x%08x end=0x%08x len=%d flag=%d"%(entry[0], entry[0]+entry[1], entry[1], entry[2]))
+        print("off=0x%08x end=0x%08x len=%10d flag=%d"%(entry[0], entry[0]+entry[1], entry[1], entry[2]))
     print()
 
-    additional_unsigneds(data, firmware_volume_list)
-
+    #additional_unsigneds(data, firmware_volume_list)
     
-
     # extract the signed digest
-    signedkey = extract_signed_digest(data, offset, length)
-    print("pkcs7 key extracted, is_signed = %d is_data=%d"%(signedkey.type_is_signed(), signedkey.type_is_data()))
+    #print("\nDigital Signature")
+    #print("===================")
+    #signedkey =
+    #extract_signed_digest(data, offset, length)
+    #print("--> pkcs7 extracted, is_signed = %d is_data=%d"%(signedkey.type_is_signed(), signedkey.type_is_data()))
 
 
-    
 
     # extract the public key
-    pkcert_guid='3A666558-43E3-4D25-9169-DB81F5DB42E1'
-    pkcert_offset, pkcert_length = find_guid_offset(firmware_volume_list, pkcert_guid)
-    if not pkcert_offset: exit(1)
-    print('--> pubkey guid %s found offset=0x%x size=%d'%(pkcert_guid, pkcert_offset, pkcert_length))
-    pkcert, pubkey = m2crypto_extract_cert (data, pkcert_offset, pkcert_length)
+    #pkcert_guid='3A666558-43E3-4D25-9169-DB81F5DB42E1'
+    #pkcert_offset, pkcert_length = find_guid_offset(firmware_volume_list, pkcert_guid)
+    #if not pkcert_offset: exit(1)
+    #print('--> pkcert guid %s found offset=0x%x size=%d'%(pkcert_guid, pkcert_offset, pkcert_length))
+    #pkcert, pubkey = m2crypto_extract_cert (data, pkcert_offset, pkcert_length)
+    #print("--> pkcert extracted, signer=%s"%(pkcert.get_issuer()))
+    #print("TODO: extract digest from signature")
 
-    print("pkcert extracted, signer=%s"%(pkcert.get_issuer()))
+    # load the certificate
+    #s = M2Crypto.SMIME.SMIME()
+    #sk = M2Crypto.X509.X509_Stack()
+    #sk.push(pkcert)
+    #s.set_x509_stack(sk)
+
+    # load the pkcs7 data
+    #p7, data
+    
+#    pkcs7 = M2Crypto.SMIME.PKCS7(signedkey, 1)
+#    pkcs7.get0_signers(M2Crypto.X509.X509_Stack())
+    
 
 
+
+    
 
     signedbody, len, digest = collect_signeddata (data, table)
+    print("\nDigest")
+    print("============")
+    print("digest for signed part = %s"%(digest))
 
-    print(len)
-    print(digest)
+
+    digest2=collect_signeddata2(data, table)
+    print ("alternative computation=%s"%(digest2))
 
     return
         
@@ -88,17 +107,20 @@ def find_guid_offset (firmware_volume_list, guid):
 
 def extract_sig_table (data, offset, length):
     table=[]
-    for off1 in range(0xef4,length, 24):
-        try:
-            fun, zeros, first, len2, flag2, bla = struct.unpack('<LLLLLL', data[offset+off1:offset+off1+24])
-            if off1 == 0: break
-        except:
+    start_offset = offset + 0xef4
+    off1 = start_offset
+    table_length=0
+    while True:
+        fun, zeros, first, leng, flag2, bla = struct.unpack('<LLLLLL', data[off1:off1+24])
+        print("first={:08x} len={:10d} f={} flag={:08x}".format(first, leng, (bla>>9)&1 ,bla))
+        if bla == 0 and leng == 0 and first == 0 :
             break
-        print("first=0x%08x last=0x%08x n=0x%08x flag=%d len2=%d"%(first, first+len2, bla, flag2, len2))
-        table.append((first, len2, flag2))
+        table.append((first+0x1000000, leng, ((bla>>9)&1)))
+        off1 += 24
+        table_length += 24
+
+    table.append((start_offset, table_length+24, True))    
     return table
-
-
 
 
 # #########################################################
@@ -116,11 +138,11 @@ def extract_signed_digest(data, offset, length):
 
     # WIN_CERTIFICATE header
     wc_dwlen, wc_wrev, wc_type= struct.unpack('<LHH', data[offset:offset+8])
-    print("dwlen=%d"%(wc_dwlen))
+    #print("dwlen=%d"%(wc_dwlen))
     offset+=8
 
     # wincert GUID
-    print("wincert guid=%s"%(unpack_guid(data[offset+8:])))
+    #print("wincert guid=%s"%(unpack_guid(data[offset+8:])))
     offset+=16
     
     # actual certificate starts here.
@@ -129,13 +151,20 @@ def extract_signed_digest(data, offset, length):
     offset += 8+16
 
     # the actual certificate
-    cert=crypto.load_pkcs7_data(crypto.FILETYPE_ASN1, data[offset:offset+wc_dwlen-24-fudge])
-    return cert
+    #cert=crypto.load_pkcs7_data(crypto.FILETYPE_ASN1, data[offset:offset+wc_dwlen-24-fudge])
+    #return cert
+    
+    p7, bio=M2Crypto.SMIME.smime_load_pkcs7_bio(M2Crypto.BIO.MemoryBuffer(data[offset:offset+wc_dwlen-24-fudge]))
+    return p7, bio
 
 def m2crypto_extract_cert (data, offset, length):
     offset += 100
     pkcert=M2Crypto.X509.load_cert_string(data[offset:offset+length], M2Crypto.X509.FORMAT_DER)
     return (pkcert, pkcert.get_pubkey())
+
+
+# #########################################################
+# #########################################################
 
 def collect_signeddata(data, table):
     body=b''
@@ -144,17 +173,41 @@ def collect_signeddata(data, table):
         offset=entry[0]
         length=entry[1]
         flag=entry[2]
-        if flag == 0:
+        if flag == 1:
+            print("collecting offset=0x%08x length=%d"%(offset, length))
             body += data[offset:offset+length]
             newlen += length
     m=hashlib.sha256()
     m.update(body)
     return ( body, newlen, m.hexdigest() )
 
+# #########################################################
+# collect the sha256 digest using the signed data table.
+# #########################################################
+
+def collect_signeddata2(data, table):
+    signedlen=0
+    unsignedlen=0
+    m=hashlib.sha256()
+    for entry in table:
+        offset=entry[0]
+        length=entry[1]
+        flag=entry[2]
+        if flag == 1:
+            print("collecting offset=0x%08x length=%d"%(offset, length))
+            m.update(data[offset:offset+length])
+            signedlen += length
+        else:
+            unsignedlen += length
+            
+    print("signed length=%d unsigned length=%d total=%d    %d"%(signedlen, unsignedlen, signedlen+unsignedlen, len(data)))
+    return m.hexdigest()
+    
+
 
 def additional_unsigneds (data, firmware_volume_list):
-    print("additional unsigned regions")
-
+    print("additional unsigned regions worklist")
+    print("==============================")
 
     # OA2
     # As with all firmware modules, the GUID is the Name in an EFI_FFS_FILE_HEADER struct.
@@ -186,24 +239,23 @@ def additional_unsigneds (data, firmware_volume_list):
     for off1 in range(offset, offset+length, 4):
         val=struct.unpack('4s',data[off1:off1+4])
         if val[0] == b'$FID':
-            print("off1=%x"%(off1))
+            #print("off1=%x"%(off1))
             break
     print("OA3 0x%08x, 0x%08x %d"%(off1, offset+49, 49))
     
     
     # signature
-    
-        
+            
     guid='414D94AD-998D-47D2-BFCD-4E882241DE32'
     offset, length = find_guid_offset (firmware_volume_list, guid) 
     offset+=116
-    print(unpack_guid(data[offset:]))
+#   print(unpack_guid(data[offset:]))
     offset+=30
     newlen=struct.unpack('<H',data[offset:offset+2])
-    print(newlen[0])
-    print("sig 0x%08x, 0x%08x %d"%(offset, offset+newlen[0], newlen[0]))
+#   print(newlen[0])
+    print("sig 0x%08x, 0x%08x %d <---- TODO"%(offset, offset+newlen[0], newlen[0]))
     
-    
+    return
 
 
 
@@ -219,6 +271,8 @@ def unpack_guid (data):
 
 
 check_firmware_sig('/home/galmasi/code/firmware/supermicro/IBM_X11QPH_20211018_storage.ROM')
+#check_firmware_sig('/home/galmasi/repo/cloud-infrastructure/xCAT_Scripts/install/firmware/smc/Softlayer_X11QPH_20200805.ROM_Signed')
+#check_firmware_sig('/home/galmasi/code/firmware/supermicro/IBM_X11QPH_20211022_compute.ROM')
 
 
 
